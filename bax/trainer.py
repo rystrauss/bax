@@ -14,6 +14,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 import optax
+import tensorflow as tf
 from chex import PRNGKey, ArrayTree, Scalar, Array
 from keras.metrics import Mean
 from keras.utils.generic_utils import Progbar
@@ -141,7 +142,7 @@ class Trainer:
         return jnp.squeeze(jax.random.split(self._prng.next(), self._num_devices))
 
     def _get_initial_params_and_state(
-        self, dataset: "tf.data.Dataset"
+        self, dataset: tf.data.Dataset
     ) -> Tuple[hk.Params, hk.State]:
         init_batch = next(dataset.as_numpy_iterator())
 
@@ -157,9 +158,9 @@ class Trainer:
 
     def fit(
         self,
-        train_dataset: "tf.data.Dataset",
+        train_dataset: tf.data.Dataset,
         steps: int,
-        val_dataset: Optional["tf.data.Dataset"] = None,
+        val_dataset: Optional[tf.data.Dataset] = None,
         validation_freq: int = 1000,
         callbacks: Optional[List["Callback"]] = None,
         initial_params: Optional[hk.Params] = None,
