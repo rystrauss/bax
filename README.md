@@ -53,7 +53,7 @@ def loss_fn(_, batch):
     accuracy = jnp.mean(jnp.argmax(preds, axis=-1) == batch["label"])
 
     # The first returned value is the loss, which is what will be minimized by the
-    # trainer. The second value is a dictionary that ccan contain other metrics you
+    # trainer. The second value is a dictionary that can contain other metrics you
     # might be interested in (or, it can just be empty).
     return loss, {"accuracy": accuracy}
 
