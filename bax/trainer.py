@@ -19,16 +19,45 @@ from chex import PRNGKey, ArrayTree, Scalar, Array
 from keras.metrics import Mean
 from keras.utils.generic_utils import Progbar
 
+# A function that can be optimized by the Trainer class. The function accepts
+# the training step number and batch of data as inputs, and outputs a scalar loss
+# as well as a dictionary of additional metrics to log.
 LossFunction = Callable[[int, ArrayTree], Tuple[Scalar, Mapping[str, Scalar]]]
 
 
 class TrainState(NamedTuple):
+    """Container for model parameters and state, and optimizer state."""
     params: hk.Params
     state: hk.State
     opt_state: optax.OptState
 
 
 class Trainer:
+    """An object that optimizes Jax/Haiku loss functions via gradient descent.
+
+    This class implements a standard gradient descent training loop as well as
+    functionality for metric logging, parallelization, and non-trainable parameters.
+
+    Args:
+        loss: The loss function to minimize.
+        optimizer: The optimizer with which to minimize the loss.
+        validation_fn: An optional function that can be different from the loss
+            function and will be used during validation (if validation data is
+            provided). By default, the loss function is used during validation.
+        trainable_predicate: A function that indicates which parameters are trainable.
+            By default, all parameters are trainable. See documentation for
+            `hk.data_structures.partition` for more details.
+        run_eagerly: If true, computations will not be JIT compiled.
+        num_devices: The number of devices over which to parallelize computations.
+            For example, if `num_devices=2`, then two minibatches will be processed at
+            the same time, each on its own GPU/TPU, and gradients/metrics will be
+            reduced across devices (i.e. the batch size is effectively doubled).
+            By default, only a single devices is used.
+        shard_validation: Whether or not to parallelize validation, assuming
+            `num_devices` is set to a value greater than 2. By default this is False.
+        seed: An optional random seed used to initialize the Trainer's random number
+            generation.
+    """
     cross_replica_axis: str = "r"
 
     def __init__(
@@ -168,6 +197,26 @@ class Trainer:
         opt_state: Optional[optax.OptState] = None,
         verbose: int = 1,
     ) -> TrainState:
+        """Runs the training loop using the provided dataset.
+
+        Args:
+            train_dataset: The dataset to use for training.
+            steps: The number of optimization steps to perform.
+            val_dataset: An optional dataset to be used for validation.
+            validation_freq: The frequency with which the validation dataset will be
+                evaluated.
+            callbacks: An optional list of callbacks apply during validation.
+            initial_params: Optional parameter values that can be provided to override
+                the randomly initialized parameters.
+            initial_state: Optional state values that can be provided to override
+                the default initialized state.
+            opt_state: Optional initial optimizer state. Can be used to resume
+                training from a previous run, for example.
+            verbose: The verbosity level.
+
+        Returns:
+            The final TrainState.
+        """
         init_params, init_state = self._get_initial_params_and_state(train_dataset)
 
         if initial_params is not None:
