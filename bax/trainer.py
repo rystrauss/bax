@@ -20,9 +20,10 @@ from keras.metrics import Mean
 from keras.utils.generic_utils import Progbar
 
 # A function that can be optimized by the Trainer class. The function accepts
-# the training step number and batch of data as inputs, and outputs a scalar loss
-# as well as a dictionary of additional metrics to log.
-LossFunction = Callable[[int, ArrayTree], Tuple[Scalar, Mapping[str, Scalar]]]
+# the training step number, a boolean indicating whether or not training mode is
+# enabled (as opposed to evaluation), and batch of data as inputs, and outputs a scalar
+# loss as well as a dictionary of additional metrics to log.
+LossFunction = Callable[[int, bool, ArrayTree], Tuple[Scalar, Mapping[str, Scalar]]]
 
 
 class TrainState(NamedTuple):
@@ -134,7 +135,7 @@ class Trainer:
         batch: ArrayTree,
     ) -> Tuple[Scalar, Tuple[Dict[str, Scalar], hk.State]]:
         params = hk.data_structures.merge(trainable_params, non_trainable_params)
-        (loss, aux), new_state = self._loss.apply(params, state, key, step, batch)
+        (loss, aux), new_state = self._loss.apply(params, state, key, step, True, batch)
         return loss, (aux, new_state)
 
     def _grad_step(
@@ -163,7 +164,7 @@ class Trainer:
     ) -> Tuple[Scalar, Mapping[str, Scalar]]:
         fn = self._validation_fn or self._loss
         (loss, aux), _ = fn.apply(
-            train_state.params, train_state.state, key, step, batch
+            train_state.params, train_state.state, key, step, False, batch
         )
         return loss, aux
 
@@ -176,14 +177,14 @@ class Trainer:
         init_batch = next(dataset.as_numpy_iterator())
 
         if self._num_devices <= 1:
-            return self._loss.init(self._prng.next(), 0, init_batch)
+            return self._loss.init(self._prng.next(), 0, True, init_batch)
 
         return jax.pmap(
             self._loss.init,
             axis_name=self.cross_replica_axis,
-            in_axes=(0, None, None),
+            in_axes=(0, None, None, None),
             out_axes=(None, None),
-        )(self._get_pmap_keys(), 0, init_batch)
+        )(self._get_pmap_keys(), 0, True, init_batch)
 
     def fit(
         self,

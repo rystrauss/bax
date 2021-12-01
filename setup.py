@@ -12,7 +12,7 @@ setup(
     author="Ryan Strauss",
     author_email="ryanrstrauss@icloud.com",
     description="A flexible trainer interface for Jax and Haiku.",
-    python_requires=">=3.8",
+    python_requires=">=3.7",
     long_description=long_description,
     long_description_content_type="text/markdown",
     install_requires=[
