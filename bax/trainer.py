@@ -184,6 +184,7 @@ class Trainer:
             axis_name=self.cross_replica_axis,
             in_axes=(0, None, None, None),
             out_axes=(None, None),
+            static_broadcasted_argnums=2,
         )(self._get_pmap_keys(), 0, True, init_batch)
 
     def fit(
