@@ -28,6 +28,7 @@ LossFunction = Callable[[int, bool, ArrayTree], Tuple[Scalar, Mapping[str, Scala
 
 class TrainState(NamedTuple):
     """Container for model parameters and state, and optimizer state."""
+
     params: hk.Params
     state: hk.State
     opt_state: optax.OptState
@@ -59,6 +60,7 @@ class Trainer:
         seed: An optional random seed used to initialize the Trainer's random number
             generation.
     """
+
     cross_replica_axis: str = "r"
 
     def __init__(
@@ -231,6 +233,10 @@ class Trainer:
             self._trainable_predicate, init_params
         )
         init_opt_state = opt_state or self._optimizer.init(trainable_params)
+
+        byte_size = hk.data_structures.tree_bytes(init_params)
+        num_params = hk.data_structures.tree_size(init_params)
+        print(f"# of Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
 
         train_state = TrainState(
             params=init_params, state=init_state, opt_state=init_opt_state
