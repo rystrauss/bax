@@ -13,11 +13,14 @@ from typing import (
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import jmp
 import optax
 import tensorflow as tf
 from chex import PRNGKey, ArrayTree, Scalar, Array
 from keras.metrics import Mean
 from keras.utils.generic_utils import Progbar
+
+from bax.data import double_buffer
 
 # A function that can be optimized by the Trainer class. The function accepts
 # the training step number, a boolean indicating whether or not training mode is
@@ -32,6 +35,7 @@ class TrainState(NamedTuple):
     params: hk.Params
     state: hk.State
     opt_state: optax.OptState
+    loss_scale: jmp.LossScale
 
 
 class Trainer:
@@ -72,6 +76,9 @@ class Trainer:
         run_eagerly: bool = False,
         num_devices: Optional[int] = None,
         shard_validation: bool = False,
+        mp_policy: Optional[jmp.Policy] = None,
+        skip_nonfinite_updates: bool = False,
+        loss_scale: Optional[jmp.LossScale] = None,
         seed: Optional[int] = None,
     ):
         self._loss = hk.transform_with_state(loss)
@@ -83,6 +90,15 @@ class Trainer:
         )
         self._trainable_predicate = trainable_predicate or (lambda *args: True)
         self._shard_validation = shard_validation
+        self._mp_policy = mp_policy or jmp.get_policy("full")
+        self._skip_nonfinite_updates = skip_nonfinite_updates
+        self._loss_scale = loss_scale or jmp.NoOpLossScale()
+
+        if isinstance(loss_scale, jmp.DynamicLossScale) and not skip_nonfinite_updates:
+            print(
+                "Warning: using jmp.DynamicLossScale but skip_nonfinite_updates is "
+                "False. Consider setting skip_nonfinite_updates=True."
+            )
 
         local_device_count = jax.local_device_count()
         num_devices = num_devices or local_device_count
@@ -149,17 +165,42 @@ class Trainer:
         (loss, (aux, new_state)), grads = jax.value_and_grad(
             self._partitioned_loss, has_aux=True
         )(trainable_params, non_trainable_params, train_state.state, key, step, batch)
+        grads = self._mp_policy.cast_to_compute(grads)
+        grads = train_state.loss_scale.unscale(grads)
+
         if self._num_devices > 1:
             grads = jax.lax.pmean(grads, axis_name=self.cross_replica_axis)
+
+        grads = self._mp_policy.cast_to_param(grads)
+
         updates, new_opt_state = self._optimizer.update(
             grads, train_state.opt_state, trainable_params
         )
         new_trainable_params = optax.apply_updates(trainable_params, updates)
+
+        loss_scale = train_state.loss_scale
+        if self._skip_nonfinite_updates:
+            grads_finite = jmp.all_finite(grads)
+            loss_scale = train_state.loss_scale.adjust(grads_finite)
+            new_trainable_params, new_state, new_opt_state = jmp.select_tree(
+                grads_finite,
+                (new_trainable_params, new_state, new_opt_state),
+                (trainable_params, train_state.state, train_state.opt_state),
+            )
+            aux["mp_grads_finite"] = grads_finite
+
+        aux["mp_loss_scale"] = loss_scale.loss_scale
+
         new_params = hk.data_structures.merge(
             new_trainable_params, non_trainable_params
         )
 
-        return TrainState(new_params, new_state, new_opt_state), loss, aux
+        new_state, aux = jmp.cast_to_full((new_state, aux))
+
+        if self._num_devices > 1:
+            aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
+
+        return TrainState(new_params, new_state, new_opt_state, loss_scale), loss, aux
 
     def _eval_step(
         self, train_state: TrainState, key: PRNGKey, step: int, batch: ArrayTree
@@ -236,10 +277,16 @@ class Trainer:
 
         byte_size = hk.data_structures.tree_bytes(init_params)
         num_params = hk.data_structures.tree_size(init_params)
-        print(f"# of Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
+        print(f"Number of Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
 
+        init_params, init_state = self._mp_policy.cast_to_param(
+            (init_params, init_state)
+        )
         train_state = TrainState(
-            params=init_params, state=init_state, opt_state=init_opt_state
+            params=init_params,
+            state=init_state,
+            opt_state=init_opt_state,
+            loss_scale=self._loss_scale,
         )
 
         metrics = defaultdict(Mean)
@@ -253,6 +300,9 @@ class Trainer:
                 val_dataset = val_dataset.batch(self._num_devices, drop_remainder=True)
 
         train_iter = train_dataset.repeat().as_numpy_iterator()
+
+        if jax.default_backend() == "gpu":
+            train_iter = double_buffer(train_iter)
 
         for step, batch in enumerate(train_iter):
             train_state, loss, aux = self._grad_fn(

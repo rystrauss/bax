@@ -5,7 +5,7 @@ with open("README.md", "r") as fp:
 
 setup(
     name="bax",
-    version="0.1.1",
+    version="0.1.2",
     packages=["bax"],
     url="https://github.com/rystrauss/bax",
     license="LICENSE",
@@ -19,6 +19,7 @@ setup(
         "dm-haiku>=0.0.5",
         "jax>=0.2.24",
         "optax>=0.0.9",
+        "jmp>=0.0.2",
         "chex>=0.0.8",
         "keras>=2.6.0",
         "tensorflow>=2.6",
