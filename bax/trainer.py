@@ -18,7 +18,7 @@ import optax
 import tensorflow as tf
 from chex import PRNGKey, ArrayTree, Scalar, Array
 from keras.metrics import Mean
-from keras.utils.generic_utils import Progbar
+from tqdm import tqdm
 
 from bax.data import double_buffer
 
@@ -75,7 +75,6 @@ class Trainer:
         trainable_predicate: Callable[[str, str, Array], bool] = None,
         run_eagerly: bool = False,
         num_devices: Optional[int] = None,
-        shard_validation: bool = False,
         mp_policy: Optional[jmp.Policy] = None,
         skip_nonfinite_updates: bool = False,
         loss_scale: Optional[jmp.LossScale] = None,
@@ -89,7 +88,6 @@ class Trainer:
             else None
         )
         self._trainable_predicate = trainable_predicate or (lambda *args: True)
-        self._shard_validation = shard_validation
         self._mp_policy = mp_policy or jmp.get_policy("full")
         self._skip_nonfinite_updates = skip_nonfinite_updates
         self._loss_scale = loss_scale or jmp.NoOpLossScale()
@@ -120,26 +118,17 @@ class Trainer:
                     "eager execution."
                 )
 
-            in_axes = (None, 0, None, 0)
             self._grad_fn = jax.pmap(
                 self._grad_step,
                 axis_name=self.cross_replica_axis,
-                in_axes=in_axes,
-                out_axes=(None, 0, 0),
+                in_axes=(0, 0, None, 0),
                 donate_argnums=0,
             )
-
-            if shard_validation:
-                self._eval_fn = jax.pmap(
-                    self._eval_step,
-                    axis_name=self.cross_replica_axis,
-                    in_axes=in_axes,
-                    out_axes=(0, 0),
-                )
-            else:
-                self._eval_fn = (
-                    self._eval_step if run_eagerly else jax.jit(self._eval_step)
-                )
+            self._eval_fn = jax.pmap(
+                self._eval_step,
+                axis_name=self.cross_replica_axis,
+                in_axes=(0, 0, None, 0),
+            )
 
         self._prng = hk.PRNGSequence(seed or random.randint(0, int(2e9)))
 
@@ -199,6 +188,7 @@ class Trainer:
 
         if self._num_devices > 1:
             aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
+            loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
 
         return TrainState(new_params, new_state, new_opt_state, loss_scale), loss, aux
 
@@ -209,26 +199,38 @@ class Trainer:
         (loss, aux), _ = fn.apply(
             train_state.params, train_state.state, key, step, False, batch
         )
+        if self._num_devices > 1:
+            aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
+            loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
         return loss, aux
 
     def _get_pmap_keys(self) -> Array:
         return jnp.squeeze(jax.random.split(self._prng.next(), self._num_devices))
 
-    def _get_initial_params_and_state(
-        self, dataset: tf.data.Dataset
-    ) -> Tuple[hk.Params, hk.State]:
-        init_batch = next(dataset.as_numpy_iterator())
+    def _get_initial_train_state(
+        self, key, init_batch, initial_params, initial_state, initial_opt_state
+    ):
+        init_params, init_state = self._loss.init(key, 0, True, init_batch)
 
-        if self._num_devices <= 1:
-            return self._loss.init(self._prng.next(), 0, True, init_batch)
+        if initial_params is not None:
+            init_params = hk.data_structures.merge(init_params, initial_params)
 
-        return jax.pmap(
-            self._loss.init,
-            axis_name=self.cross_replica_axis,
-            in_axes=(0, None, None, None),
-            out_axes=(None, None),
-            static_broadcasted_argnums=2,
-        )(self._get_pmap_keys(), 0, True, init_batch)
+        if initial_state is not None:
+            init_state = hk.data_structures.merge(init_state, initial_state)
+
+        trainable_params, _ = hk.data_structures.partition(
+            self._trainable_predicate, init_params
+        )
+        init_opt_state = initial_opt_state or self._optimizer.init(trainable_params)
+
+        init_params = self._mp_policy.cast_to_param(init_params)
+
+        return TrainState(
+            params=init_params,
+            state=init_state,
+            opt_state=init_opt_state,
+            loss_scale=self._loss_scale,
+        )
 
     def fit(
         self,
@@ -239,7 +241,7 @@ class Trainer:
         callbacks: Optional[List["Callback"]] = None,
         initial_params: Optional[hk.Params] = None,
         initial_state: Optional[hk.State] = None,
-        opt_state: Optional[optax.OptState] = None,
+        initial_opt_state: Optional[optax.OptState] = None,
         verbose: int = 1,
     ) -> TrainState:
         """Runs the training loop using the provided dataset.
@@ -255,48 +257,45 @@ class Trainer:
                 the randomly initialized parameters.
             initial_state: Optional state values that can be provided to override
                 the default initialized state.
-            opt_state: Optional initial optimizer state. Can be used to resume
+            initial_opt_state: Optional initial optimizer state. Can be used to resume
                 training from a previous run, for example.
             verbose: The verbosity level.
 
         Returns:
             The final TrainState.
         """
-        init_params, init_state = self._get_initial_params_and_state(train_dataset)
+        init_batch = next(train_dataset.take(1).as_numpy_iterator())
 
-        if initial_params is not None:
-            init_params = hk.data_structures.merge(init_params, initial_params)
+        if self._num_devices <= 1:
+            train_state = self._get_initial_train_state(
+                self._prng.next(),
+                init_batch,
+                initial_params,
+                initial_state,
+                initial_opt_state,
+            )
 
-        if initial_state is not None:
-            init_state = hk.data_structures.merge(init_state, initial_state)
+            byte_size = hk.data_structures.tree_bytes(train_state.params)
+            num_params = hk.data_structures.tree_size(train_state.params)
+        else:
+            keys = jnp.asarray([self._prng.next()] * self._num_devices)
+            train_state = jax.pmap(
+                self._get_initial_train_state, in_axes=(0, None, None, None, None)
+            )(keys, init_batch, initial_params, initial_state, initial_opt_state)
 
-        trainable_params, _ = hk.data_structures.partition(
-            self._trainable_predicate, init_params
-        )
-        init_opt_state = opt_state or self._optimizer.init(trainable_params)
+            params = jax.tree_map(lambda x: x[0], train_state.params)
+            byte_size = hk.data_structures.tree_bytes(params)
+            num_params = hk.data_structures.tree_size(params)
 
-        byte_size = hk.data_structures.tree_bytes(init_params)
-        num_params = hk.data_structures.tree_size(init_params)
         print(f"Number of Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
 
-        init_params, init_state = self._mp_policy.cast_to_param(
-            (init_params, init_state)
-        )
-        train_state = TrainState(
-            params=init_params,
-            state=init_state,
-            opt_state=init_opt_state,
-            loss_scale=self._loss_scale,
-        )
-
         metrics = defaultdict(Mean)
-        pbar = Progbar(steps, verbose=verbose)
 
         callbacks = callbacks or []
 
         if self._num_devices > 1:
             train_dataset = train_dataset.batch(self._num_devices, drop_remainder=True)
-            if self._shard_validation:
+            if val_dataset is not None:
                 val_dataset = val_dataset.batch(self._num_devices, drop_remainder=True)
 
         train_iter = train_dataset.repeat().as_numpy_iterator()
@@ -304,45 +303,56 @@ class Trainer:
         if jax.default_backend() == "gpu":
             train_iter = double_buffer(train_iter)
 
+        pbar = tqdm(desc="Training", disable=verbose == 0, total=steps)
+
         for step, batch in enumerate(train_iter):
             train_state, loss, aux = self._grad_fn(
                 train_state, self._get_pmap_keys(), step, batch
             )
 
+            if self._num_devices > 1:
+                aux = jax.tree_map(lambda x: x[0], aux)
+                loss = jax.tree_map(lambda x: x[0], loss)
+
+            aux = jax.device_get(aux)
+            loss = jax.device_get(loss)
+
             metrics["loss"].update_state(loss)
             for k, v in aux.items():
                 metrics[k].update_state(v)
 
-            pbar.update(
-                step,
-                [
-                    (n, m.result())
-                    for n, m in metrics.items()
-                    if not n.startswith("val_")
-                ],
-            )
-
             if val_dataset is not None and step % validation_freq == 0:
-                for val_batch in val_dataset.as_numpy_iterator():
+                val_iter = val_dataset.as_numpy_iterator()
+                if jax.default_backend() == "gpu":
+                    val_iter = double_buffer(val_iter)
+
+                for val_batch in val_iter:
                     val_loss, val_aux = self._eval_fn(
                         train_state,
-                        self._get_pmap_keys()
-                        if self._shard_validation
-                        else self._prng.next(),
+                        self._get_pmap_keys(),
                         step,
                         val_batch,
                     )
+
+                    if self._num_devices > 1:
+                        val_aux = jax.tree_map(lambda x: x[0], val_aux)
+                        val_loss = jax.tree_map(lambda x: x[0], val_loss)
+
+                    val_aux = jax.device_get(val_aux)
+                    val_loss = jax.device_get(val_loss)
 
                     metrics["val_loss"].update_state(val_loss)
                     for k, v in val_aux.items():
                         metrics[f"val_{k}"].update_state(v)
 
-                    for callback in callbacks:
-                        callback.on_validation_step(
-                            train_state, self._prng.next(), val_batch
-                        )
-
                 logs = {k: v.result().numpy().item() for k, v in metrics.items()}
+
+                print_string = f"[Step {step}]"
+
+                for k, v in logs.items():
+                    print_string += f" -- {k}: {v:.3f}"
+
+                pbar.write(print_string)
 
                 for callback in callbacks:
                     callback.on_validation_end(train_state, step, logs)
@@ -352,5 +362,10 @@ class Trainer:
 
             if step >= steps:
                 break
+
+            pbar.update()
+
+        if self._num_devices > 1:
+            train_state = jax.tree_map(lambda x: x[0], train_state)
 
         return jax.device_get(train_state)

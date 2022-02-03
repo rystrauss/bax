@@ -1,18 +1,12 @@
 import pickle
 from typing import Dict, Any
 
-from chex import PRNGKey, ArrayTree
 from optax import Schedule
 
 from bax.trainer import TrainState
 
 
 class Callback:
-    def on_validation_step(
-        self, train_state: TrainState, key: PRNGKey, batch: ArrayTree
-    ):
-        pass
-
     def on_validation_end(
         self, train_state: TrainState, step: int, logs: Dict[str, Any]
     ):
