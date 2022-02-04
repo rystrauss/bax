@@ -1,6 +1,8 @@
 import pickle
 from typing import Dict, Any
 
+import jax
+from jax.interpreters.pxla import ShardedDeviceArray
 from optax import Schedule
 
 from bax.trainer import TrainState
@@ -37,6 +39,11 @@ class CheckpointCallback(Callback):
             self._objective == "max" and logs[self._track] > self._best
         ):
             self._best = logs[self._track]
+
+            if isinstance(jax.tree_leaves(train_state.params)[0], ShardedDeviceArray):
+                train_state = jax.tree_map(lambda x: x[0], train_state)
+
+            train_state = jax.device_get(train_state)
 
             with open(self._path, "wb") as fp:
                 pickle.dump(train_state, fp)
