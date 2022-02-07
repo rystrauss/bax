@@ -36,6 +36,7 @@ class TrainState(NamedTuple):
     state: hk.State
     opt_state: optax.OptState
     loss_scale: jmp.LossScale
+    ema_params: Optional[hk.Params]
 
 
 class Trainer:
@@ -67,6 +68,10 @@ class Trainer:
             be applied when calculating gradients.
         gradient_skipping_threshold: If specified, then updates with a global gradient
             norm that is greater than this will be skipped.
+        ema_rate: If provided the exponential moving average, with this rate, of the
+            parameters will be tracked and included in the train state.
+        use_ema_for_eval: If True and `ema_rate` is not None, then the EMA parameters
+            will be used for the validation data.
         seed: An optional random seed used to initialize the Trainer's random number
             generation.
     """
@@ -85,6 +90,8 @@ class Trainer:
         skip_nonfinite_updates: bool = False,
         loss_scale: Optional[jmp.LossScale] = None,
         gradient_skipping_threshold: Optional[float] = None,
+        ema_rate: Optional[float] = None,
+        use_ema_for_eval: bool = False,
         seed: Optional[int] = None,
     ):
         self._loss = hk.transform_with_state(loss)
@@ -99,6 +106,8 @@ class Trainer:
         self._skip_nonfinite_updates = skip_nonfinite_updates
         self._loss_scale = loss_scale or jmp.NoOpLossScale()
         self._gradient_skipping_threshold = gradient_skipping_threshold
+        self._ema_rate = ema_rate
+        self._use_ema_for_eval = use_ema_for_eval
 
         if isinstance(loss_scale, jmp.DynamicLossScale) and not skip_nonfinite_updates:
             print(
@@ -207,15 +216,29 @@ class Trainer:
             aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
             loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
 
-        return TrainState(new_params, new_state, new_opt_state, loss_scale), loss, aux
+        if self._ema_rate is not None:
+            new_ema_params = jax.tree_multimap(
+                lambda e, p: e * self._ema_rate + (1 - self._ema_rate) * p,
+                train_state.ema_params,
+                new_params,
+            )
+        else:
+            new_ema_params = train_state.ema_params
+
+        new_train_state = TrainState(
+            new_params, new_state, new_opt_state, loss_scale, new_ema_params
+        )
+        return new_train_state, loss, aux
 
     def _eval_step(
         self, train_state: TrainState, key: PRNGKey, step: int, batch: ArrayTree
     ) -> Tuple[Scalar, Mapping[str, Scalar]]:
         fn = self._validation_fn or self._loss
-        (loss, aux), _ = fn.apply(
-            train_state.params, train_state.state, key, step, False, batch
-        )
+        if self._ema_rate is not None and self._use_ema_for_eval:
+            params = train_state.ema_params
+        else:
+            params = train_state.params
+        (loss, aux), _ = fn.apply(params, train_state.state, key, step, False, batch)
         if self._num_devices > 1:
             aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
             loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
@@ -241,12 +264,14 @@ class Trainer:
         init_opt_state = initial_opt_state or self._optimizer.init(trainable_params)
 
         init_params = self._mp_policy.cast_to_param(init_params)
+        ema_params = None if self._ema_rate is None else init_params
 
         return TrainState(
             params=init_params,
             state=init_state,
             opt_state=init_opt_state,
             loss_scale=self._loss_scale,
+            ema_params=ema_params,
         )
 
     def fit(
