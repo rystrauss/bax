@@ -8,7 +8,6 @@ from typing import (
     Mapping,
     List,
     Dict,
-    Union,
 )
 
 import haiku as hk
