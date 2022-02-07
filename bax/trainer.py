@@ -8,6 +8,7 @@ from typing import (
     Mapping,
     List,
     Dict,
+    Union,
 )
 
 import haiku as hk
@@ -59,8 +60,14 @@ class Trainer:
             the same time, each on its own GPU/TPU, and gradients/metrics will be
             reduced across devices (i.e. the batch size is effectively doubled).
             By default, only a single devices is used.
-        shard_validation: Whether or not to parallelize validation, assuming
-            `num_devices` is set to a value greater than 2. By default this is False.
+        mp_policy: A `jmp.Policy` that defines the mixed precision policy to use in
+            for training steps.
+        skip_nonfinite_updates: If True, then updates with non-finite gradients will
+            be skipped.
+        loss_scale: A `jmp.LossScale` object, which defines potential loss scaling to
+            be applied when calculating gradients.
+        gradient_skipping_threshold: If specified, then updates with a global gradient
+            norm that is greater than this will be skipped.
         seed: An optional random seed used to initialize the Trainer's random number
             generation.
     """
@@ -78,6 +85,7 @@ class Trainer:
         mp_policy: Optional[jmp.Policy] = None,
         skip_nonfinite_updates: bool = False,
         loss_scale: Optional[jmp.LossScale] = None,
+        gradient_skipping_threshold: Optional[float] = None,
         seed: Optional[int] = None,
     ):
         self._loss = hk.transform_with_state(loss)
@@ -91,6 +99,7 @@ class Trainer:
         self._mp_policy = mp_policy or jmp.get_policy("full")
         self._skip_nonfinite_updates = skip_nonfinite_updates
         self._loss_scale = loss_scale or jmp.NoOpLossScale()
+        self._gradient_skipping_threshold = gradient_skipping_threshold
 
         if isinstance(loss_scale, jmp.DynamicLossScale) and not skip_nonfinite_updates:
             print(
@@ -178,7 +187,16 @@ class Trainer:
             )
             aux["mp_grads_finite"] = grads_finite
 
-        aux["mp_loss_scale"] = loss_scale.loss_scale
+        if self._mp_policy is not None:
+            aux["mp_loss_scale"] = loss_scale.loss_scale
+
+        if self._gradient_skipping_threshold is not None:
+            should_skip = optax.global_norm(grads) > self._gradient_skipping_threshold
+            new_trainable_params, new_state, new_opt_state = jmp.select_tree(
+                should_skip,
+                (trainable_params, train_state.state, train_state.opt_state),
+                (new_trainable_params, new_state, new_opt_state),
+            )
 
         new_params = hk.data_structures.merge(
             new_trainable_params, non_trainable_params
