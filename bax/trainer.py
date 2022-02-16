@@ -36,7 +36,7 @@ class TrainState(NamedTuple):
     state: hk.State
     opt_state: optax.OptState
     loss_scale: jmp.LossScale
-    ema_params: Optional[hk.Params]
+    ema_params: Optional[hk.Params] = None
 
 
 class Trainer:
@@ -198,6 +198,7 @@ class Trainer:
         if self._mp_policy is not None:
             aux["mp_loss_scale"] = loss_scale.loss_scale
 
+        should_skip = False
         if self._gradient_skipping_threshold is not None:
             should_skip = optax.global_norm(grads) > self._gradient_skipping_threshold
             new_trainable_params, new_state, new_opt_state = jmp.select_tree(
@@ -216,7 +217,7 @@ class Trainer:
             aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
             loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
 
-        if self._ema_rate is not None:
+        if self._ema_rate is not None and not should_skip:
             new_ema_params = jax.tree_multimap(
                 lambda e, p: e * self._ema_rate + (1 - self._ema_rate) * p,
                 train_state.ema_params,
