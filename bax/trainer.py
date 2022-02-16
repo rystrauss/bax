@@ -323,7 +323,9 @@ class Trainer:
         else:
             keys = jnp.asarray([self._prng.next()] * self._num_devices)
             train_state = jax.pmap(
-                self._get_initial_train_state, in_axes=(0, None, None, None, None)
+                self._get_initial_train_state,
+                axis_name=self.cross_replica_axis,
+                in_axes=(0, None, None, None, None),
             )(keys, init_batch, initial_params, initial_state, initial_opt_state)
 
             params = jax.tree_map(lambda x: x[0], train_state.params)
