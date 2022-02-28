@@ -20,7 +20,7 @@ Please note that this library has not yet been extensively tested.
 You can install Bax via pip:
 
 ```
-pip install git+https://github.com/rystrauss/bax
+pip install bax
 ```
 
 ## Usage
