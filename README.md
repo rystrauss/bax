@@ -20,7 +20,7 @@ Please note that this library has not yet been extensively tested.
 You can install Bax via pip:
 
 ```
-pip install git+https://github.com/rystrauss/bax
+pip install bax
 ```
 
 ## Usage
@@ -43,7 +43,7 @@ from bax.trainer import Trainer
 ds = tfds.load("mnist", split="train").batch(32, drop_remainder=True)
 
 # The loss function that we want to minimize.
-def loss_fn(_, batch):
+def loss_fn(step, is_training, batch):
     model = hk.Sequential([hk.Flatten(), hk.nets.MLP([128, 128, 10])])
 
     preds = model(batch["image"] / 255.0)
@@ -59,6 +59,5 @@ def loss_fn(_, batch):
 
 trainer = Trainer(loss=loss_fn, optimizer=optax.adam(0.001))
 
-# You should see the loss and accuracy be displayed during training.
 trainer.fit(ds, 10000)
 ```
