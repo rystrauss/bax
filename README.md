@@ -40,7 +40,8 @@ from bax.trainer import Trainer
 
 
 # Use TensorFlow Datasets to get our MNIST data.
-ds = tfds.load("mnist", split="train").batch(32, drop_remainder=True)
+train_ds = tfds.load("mnist", split="train").batch(32, drop_remainder=True)
+test_ds = tfds.load("mnist", split="test").batch(32, drop_remainder=True)
 
 # The loss function that we want to minimize.
 def loss_fn(step, is_training, batch):
@@ -59,5 +60,7 @@ def loss_fn(step, is_training, batch):
 
 trainer = Trainer(loss=loss_fn, optimizer=optax.adam(0.001))
 
-trainer.fit(ds, 10000)
+# Run the training loop. Metrics will be printed out each time the validation
+# dataset is evaluated (in this case, every 1000 steps).
+trainer.fit(train_ds, steps=10000, val_dataset=test_ds, validation_freq=1000)
 ```
