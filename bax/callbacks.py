@@ -2,6 +2,7 @@ import pickle
 from typing import Dict, Any
 
 import jax
+from chex import PRNGKey, ArrayTree
 from jax.interpreters.pxla import ShardedDeviceArray
 from optax import Schedule
 
@@ -9,6 +10,11 @@ from bax.trainer import TrainState
 
 
 class Callback:
+    def on_validation_step(
+        self, train_state: TrainState, key: PRNGKey, batch: ArrayTree
+    ):
+        pass
+
     def on_validation_end(
         self, train_state: TrainState, step: int, logs: Dict[str, Any]
     ):

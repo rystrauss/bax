@@ -2,7 +2,7 @@ import os
 
 
 def set_jax_memory_preallocation(value: bool):
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = str(value)
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true" if value else "false"
 
 
 def set_tf_memory_preallocation(value: bool):

@@ -195,7 +195,7 @@ class Trainer:
             )
             aux["mp_grads_finite"] = grads_finite
 
-        if self._mp_policy is not None:
+        if not isinstance(self._loss_scale, jmp.NoOpLossScale):
             aux["mp_loss_scale"] = loss_scale.loss_scale
 
         should_skip = False
@@ -332,7 +332,7 @@ class Trainer:
             byte_size = hk.data_structures.tree_bytes(params)
             num_params = hk.data_structures.tree_size(params)
 
-        print(f"Number of Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
+        print(f"Total Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
 
         metrics = defaultdict(Mean)
 
@@ -378,6 +378,11 @@ class Trainer:
                         step,
                         val_batch,
                     )
+
+                    for callback in callbacks:
+                        callback.on_validation_step(
+                            train_state, self._get_pmap_keys(), val_batch
+                        )
 
                     if self._num_devices > 1:
                         val_aux = jax.tree_map(lambda x: x[0], val_aux)
