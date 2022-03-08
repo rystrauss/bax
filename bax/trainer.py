@@ -397,15 +397,15 @@ class Trainer:
 
                 logs = {k: v.result().numpy().item() for k, v in metrics.items()}
 
+                for callback in callbacks:
+                    callback.on_validation_end(train_state, step, logs)
+
                 print_string = f"[Step {step}]"
 
                 for k, v in logs.items():
                     print_string += f" -- {k}: {v:.3f}"
 
                 pbar.write(print_string)
-
-                for callback in callbacks:
-                    callback.on_validation_end(train_state, step, logs)
 
                 for v in metrics.values():
                     v.reset_state()
