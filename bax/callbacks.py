@@ -35,27 +35,45 @@ class LearningRateLoggerCallback(Callback):
 
 
 class CheckpointCallback(Callback):
-    def __init__(self, path: str, track: str = "val_loss", objective: str = "min"):
+    def __init__(
+        self,
+        path: str,
+        track: str = "val_loss",
+        objective: str = "min",
+        save_freq: int = 1,
+    ):
         self._path = path
         self._track = track
         self._objective = objective
+        self._save_freq = save_freq
         self._best = float("inf") if objective == "min" else -float("inf")
+
+        self._count = 0
+        self.best_checkpoint = None
 
     def on_validation_end(
         self, train_state: TrainState, step: int, logs: Dict[str, Any]
     ):
+        if isinstance(jax.tree_leaves(train_state.params)[0], ShardedDeviceArray):
+            train_state = jax.tree_map(lambda x: x[0], train_state)
+
+        train_state = jax.device_get(train_state)
+        checkpoint_path = self._path.format(**logs)
+
         if (self._objective == "min" and logs[self._track] < self._best) or (
             self._objective == "max" and logs[self._track] > self._best
         ):
             self._best = logs[self._track]
+            self.best_checkpoint = checkpoint_path
 
-            if isinstance(jax.tree_leaves(train_state.params)[0], ShardedDeviceArray):
-                train_state = jax.tree_map(lambda x: x[0], train_state)
-
-            train_state = jax.device_get(train_state)
-
-            with open(self._path, "wb") as fp:
+            with open(checkpoint_path, "wb") as fp:
                 pickle.dump(train_state, fp)
+
+        if self._count % self._save_freq == 0:
+            with open(checkpoint_path, "wb") as fp:
+                pickle.dump(train_state, fp)
+
+        self._count += 1
 
 
 class WandbCallback(Callback):
