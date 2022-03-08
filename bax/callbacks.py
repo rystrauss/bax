@@ -58,7 +58,7 @@ class CheckpointCallback(Callback):
             train_state = jax.tree_map(lambda x: x[0], train_state)
 
         train_state = jax.device_get(train_state)
-        checkpoint_path = self._path.format(**logs)
+        checkpoint_path = self._path.format(**logs, step=step)
 
         if (self._objective == "min" and logs[self._track] < self._best) or (
             self._objective == "max" and logs[self._track] > self._best
