@@ -220,11 +220,14 @@ class Trainer:
             aux = jax.lax.pmean(aux, axis_name=self.cross_replica_axis)
             loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
 
-        if self._ema_rate is not None and not should_skip:
+        if self._ema_rate is not None:
             new_ema_params = jax.tree_multimap(
                 lambda e, p: e * self._ema_rate + (1 - self._ema_rate) * p,
                 train_state.ema_params,
                 new_params,
+            )
+            new_ema_params = jmp.select_tree(
+                should_skip, new_ema_params, train_state.ema_params
             )
         else:
             new_ema_params = train_state.ema_params
