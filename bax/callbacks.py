@@ -1,5 +1,5 @@
 import pickle
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Sequence
 
 import jax
 from chex import PRNGKey, ArrayTree
@@ -10,6 +10,9 @@ from bax.trainer import TrainState
 
 
 class Callback:
+    def on_train_step(self, step: int, logs: Dict[str, Any]):
+        pass
+
     def on_validation_step(
         self, train_state: TrainState, key: PRNGKey, batch: ArrayTree
     ):
@@ -56,8 +59,22 @@ class CheckpointCallback(Callback):
 
 
 class WandbCallback(Callback):
-    def __init__(self, run: "wandb.sdk.wandb_run.Run"):
+    def __init__(
+        self,
+        run: "wandb.sdk.wandb_run.Run",
+        train_step_metrics: Optional[Sequence[str]] = None,
+    ):
         self._run = run
+        self._train_step_metrics = train_step_metrics
+
+    def on_train_step(self, step: int, logs: Dict[str, Any]):
+        if self._train_step_metrics is not None:
+            to_log = {}
+
+            for k in self._train_step_metrics:
+                to_log[k] = logs[k]
+
+            self._run.log(logs, step=step)
 
     def on_validation_end(
         self, train_state: TrainState, step: int, logs: Dict[str, Any]

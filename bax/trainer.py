@@ -14,6 +14,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 import jmp
+import numpy as np
 import optax
 import tensorflow as tf
 from chex import PRNGKey, ArrayTree, Scalar, Array
@@ -85,7 +86,7 @@ class Trainer:
         validation_fn: Optional[LossFunction] = None,
         trainable_predicate: Callable[[str, str, Array], bool] = None,
         run_eagerly: bool = False,
-        num_devices: Optional[int] = None,
+        num_devices: int = 1,
         mp_policy: Optional[jmp.Policy] = None,
         skip_nonfinite_updates: bool = False,
         loss_scale: Optional[jmp.LossScale] = None,
@@ -116,7 +117,6 @@ class Trainer:
             )
 
         local_device_count = jax.local_device_count()
-        num_devices = num_devices or local_device_count
         if num_devices > local_device_count:
             raise ValueError(
                 f"num_devices is {num_devices}, but there are only "
@@ -200,12 +200,15 @@ class Trainer:
 
         should_skip = False
         if self._gradient_skipping_threshold is not None:
-            should_skip = optax.global_norm(grads) > self._gradient_skipping_threshold
+            grad_norm = optax.global_norm(grads)
+            should_skip = grad_norm > self._gradient_skipping_threshold
             new_trainable_params, new_state, new_opt_state = jmp.select_tree(
                 should_skip,
                 (trainable_params, train_state.state, train_state.opt_state),
                 (new_trainable_params, new_state, new_opt_state),
             )
+
+            aux["gradient_norm"] = grad_norm
 
         new_params = hk.data_structures.merge(
             new_trainable_params, non_trainable_params
@@ -361,6 +364,12 @@ class Trainer:
 
             aux = jax.device_get(aux)
             loss = jax.device_get(loss)
+
+            train_step_logs = {k: np.asarray(v).item() for k, v in aux.items()}
+            train_step_logs["loss"] = np.asarray(loss).item()
+
+            for callback in callbacks:
+                callback.on_train_step(step, train_step_logs)
 
             metrics["loss"].update_state(loss)
             for k, v in aux.items():
