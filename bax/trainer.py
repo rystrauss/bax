@@ -226,7 +226,7 @@ class Trainer:
                 new_params,
             )
             new_ema_params = jmp.select_tree(
-                should_skip, new_ema_params, train_state.ema_params
+                should_skip, train_state.ema_params, new_ema_params
             )
         else:
             new_ema_params = train_state.ema_params
