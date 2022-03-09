@@ -92,7 +92,7 @@ class WandbCallback(Callback):
             for k in self._train_step_metrics:
                 to_log[k] = logs[k]
 
-            self._run.log(logs, step=step)
+            self._run.log(to_log, step=step)
 
     def on_validation_end(
         self, train_state: TrainState, step: int, logs: Dict[str, Any]
