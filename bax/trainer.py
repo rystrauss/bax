@@ -186,28 +186,25 @@ class Trainer:
         )
         new_trainable_params = optax.apply_updates(trainable_params, updates)
 
-        loss_scale = train_state.loss_scale
-        if self._skip_nonfinite_updates:
-            grads_finite = jmp.all_finite(grads)
-            loss_scale = train_state.loss_scale.adjust(grads_finite)
-            new_trainable_params, new_state, new_opt_state = jmp.select_tree(
-                grads_finite,
-                (new_trainable_params, new_state, new_opt_state),
-                (trainable_params, train_state.state, train_state.opt_state),
-            )
-            aux["mp_grads_finite"] = grads_finite
+        grads_finite = jmp.all_finite(grads)
+        loss_scale = train_state.loss_scale.adjust(grads_finite)
 
         if not isinstance(self._loss_scale, jmp.NoOpLossScale):
             aux["mp_loss_scale"] = loss_scale.loss_scale
 
-        should_skip = jnp.zeros(grad_norm.shape, jnp.bool_)
+        should_skip = jnp.zeros((), jnp.bool_)
+
+        if self._skip_nonfinite_updates:
+            should_skip |= ~grads_finite
+
         if self._gradient_skipping_threshold is not None:
-            should_skip = grad_norm > self._gradient_skipping_threshold
-            new_trainable_params, new_state, new_opt_state = jmp.select_tree(
-                should_skip,
-                (trainable_params, train_state.state, train_state.opt_state),
-                (new_trainable_params, new_state, new_opt_state),
-            )
+            should_skip |= grad_norm > self._gradient_skipping_threshold
+
+        new_trainable_params, new_state, new_opt_state = jmp.select_tree(
+            should_skip,
+            (trainable_params, train_state.state, train_state.opt_state),
+            (new_trainable_params, new_state, new_opt_state),
+        )
 
         new_params = hk.data_structures.merge(
             new_trainable_params, non_trainable_params
