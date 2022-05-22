@@ -97,4 +97,4 @@ class WandbCallback(Callback):
     def on_validation_end(
         self, train_state: TrainState, step: int, logs: Dict[str, Any]
     ):
-        self._run.log(logs, step=step)
+        self._run.log(logs, step=step, commit=True)

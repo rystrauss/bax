@@ -1,4 +1,5 @@
 from typing import Iterable, Generator
+
 import jax
 from chex import ArrayTree
 

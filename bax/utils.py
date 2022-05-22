@@ -15,3 +15,7 @@ def set_tf_memory_preallocation(value: bool):
                 config.experimental.set_memory_growth(gpu, value)
         except RuntimeError as e:
             print(e)
+
+
+def set_tf_min_log_level(level: int):
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = str(level)

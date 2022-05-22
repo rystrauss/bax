@@ -19,7 +19,9 @@ import optax
 import tensorflow as tf
 from chex import PRNGKey, ArrayTree, Scalar, Array
 from keras.metrics import Mean
-from tqdm import tqdm
+from rich import print
+from rich.progress import Progress
+from rich.table import Table
 
 from bax.data import double_buffer
 
@@ -217,7 +219,7 @@ class Trainer:
             loss = jax.lax.pmean(loss, axis_name=self.cross_replica_axis)
 
         if self._ema_rate is not None:
-            new_ema_params = jax.tree_multimap(
+            new_ema_params = jax.tree_map(
                 lambda e, p: e * self._ema_rate + (1 - self._ema_rate) * p,
                 train_state.ema_params,
                 new_params,
@@ -334,7 +336,7 @@ class Trainer:
             byte_size = hk.data_structures.tree_bytes(params)
             num_params = hk.data_structures.tree_size(params)
 
-        print(f"Total Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
+        print(f"[blue bold]Total Parameters: {num_params}, {byte_size / 1e6:.2f}MB")
 
         metrics = defaultdict(Mean)
 
@@ -350,78 +352,83 @@ class Trainer:
         if jax.default_backend() == "gpu":
             train_iter = double_buffer(train_iter)
 
-        pbar = tqdm(desc="Training", disable=verbose == 0, total=steps)
+        with Progress(disable=verbose == 0) as progress:
 
-        for step, batch in enumerate(train_iter):
-            train_state, loss, aux = self._grad_fn(
-                train_state, self._get_pmap_keys(), step, batch
-            )
+            training_task = progress.add_task("[red]Training:", total=steps)
 
-            if self._num_devices > 1:
-                aux = jax.tree_map(lambda x: x[0], aux)
-                loss = jax.tree_map(lambda x: x[0], loss)
+            for step, batch in enumerate(train_iter):
+                train_state, loss, aux = self._grad_fn(
+                    train_state, self._get_pmap_keys(), step, batch
+                )
 
-            aux = jax.device_get(aux)
-            loss = jax.device_get(loss)
+                if self._num_devices > 1:
+                    aux = jax.tree_map(lambda x: x[0], aux)
+                    loss = jax.tree_map(lambda x: x[0], loss)
 
-            train_step_logs = {k: np.asarray(v).item() for k, v in aux.items()}
-            train_step_logs["loss"] = np.asarray(loss).item()
+                aux = jax.device_get(aux)
+                loss = jax.device_get(loss)
 
-            for callback in callbacks:
-                callback.on_train_step(step, train_step_logs)
-
-            metrics["loss"].update_state(loss)
-            for k, v in aux.items():
-                metrics[k].update_state(v)
-
-            if val_dataset is not None and step % validation_freq == 0:
-                val_iter = val_dataset.as_numpy_iterator()
-                if jax.default_backend() == "gpu":
-                    val_iter = double_buffer(val_iter)
-
-                for val_batch in val_iter:
-                    val_loss, val_aux = self._eval_fn(
-                        train_state,
-                        self._get_pmap_keys(),
-                        step,
-                        val_batch,
-                    )
-
-                    for callback in callbacks:
-                        callback.on_validation_step(
-                            train_state, self._get_pmap_keys(), val_batch
-                        )
-
-                    if self._num_devices > 1:
-                        val_aux = jax.tree_map(lambda x: x[0], val_aux)
-                        val_loss = jax.tree_map(lambda x: x[0], val_loss)
-
-                    val_aux = jax.device_get(val_aux)
-                    val_loss = jax.device_get(val_loss)
-
-                    metrics["val_loss"].update_state(val_loss)
-                    for k, v in val_aux.items():
-                        metrics[f"val_{k}"].update_state(v)
-
-                logs = {k: v.result().numpy().item() for k, v in metrics.items()}
-
-                print_string = f"[Step {step}]"
-
-                for k, v in logs.items():
-                    print_string += f" -- {k}: {v:.3f}"
-
-                pbar.write(print_string)
+                train_step_logs = {k: np.asarray(v).item() for k, v in aux.items()}
+                train_step_logs["loss"] = np.asarray(loss).item()
 
                 for callback in callbacks:
-                    callback.on_validation_end(train_state, step, logs)
+                    callback.on_train_step(step, train_step_logs)
 
-                for v in metrics.values():
-                    v.reset_state()
+                metrics["loss"].update_state(loss)
+                for k, v in aux.items():
+                    metrics[k].update_state(v)
 
-            if step >= steps:
-                break
+                if step % validation_freq == 0:
+                    if val_dataset is not None:
+                        val_iter = val_dataset.as_numpy_iterator()
+                        if jax.default_backend() == "gpu":
+                            val_iter = double_buffer(val_iter)
 
-            pbar.update()
+                        for val_batch in val_iter:
+                            val_loss, val_aux = self._eval_fn(
+                                train_state,
+                                self._get_pmap_keys(),
+                                step,
+                                val_batch,
+                            )
+
+                            for callback in callbacks:
+                                callback.on_validation_step(
+                                    train_state, self._get_pmap_keys(), val_batch
+                                )
+
+                            if self._num_devices > 1:
+                                val_aux = jax.tree_map(lambda x: x[0], val_aux)
+                                val_loss = jax.tree_map(lambda x: x[0], val_loss)
+
+                            val_aux = jax.device_get(val_aux)
+                            val_loss = jax.device_get(val_loss)
+
+                            metrics["val_loss"].update_state(val_loss)
+                            for k, v in val_aux.items():
+                                metrics[f"val_{k}"].update_state(v)
+
+                    logs = {k: v.result().numpy().item() for k, v in metrics.items()}
+
+                    table = Table(title=f"Step {step}")
+
+                    for k in logs.keys():
+                        table.add_column(k)
+
+                    table.add_row(*[f"{v:.3f}" for v in logs.values()])
+
+                    progress.console.log(table)
+
+                    for callback in callbacks:
+                        callback.on_validation_end(train_state, step, logs)
+
+                    for v in metrics.values():
+                        v.reset_state()
+
+                progress.update(training_task, advance=1)
+
+                if step >= steps:
+                    break
 
         if self._num_devices > 1:
             train_state = jax.tree_map(lambda x: x[0], train_state)
